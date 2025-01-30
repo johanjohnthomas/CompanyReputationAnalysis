@@ -92,36 +92,56 @@ async def handle_rate_limit(generator, max_retries=3):
             logger.error("[handle_rate_limit] Unknown exception: %s", e)
             raise
 
-async def fetch_with_retry(coro, item_desc: str = "unspecified", max_tries=3):
+async def fetch_with_retry(coro_func, item_desc: str = "unspecified", max_tries=3):
     """
-    Calls a single async function (coro) and retries if TooManyRequests (429) is raised.
-    Checks the 'Retry-After' header to determine wait time, falling back to 30s.
-    Returns None if all retries fail.
+    Calls a single async function (coro_func) and retries if an exception is raised.
+    Specifically checks for TooManyRequests to respect Retry-After.
+    Logs the final exception if all retries fail and returns None.
     """
     tries = 0
     last_exception = None
+
     while tries < max_tries:
         try:
-            return await coro
+            return await coro_func()  # Call the coroutine function to get a new coroutine each time
         except TooManyRequests as e:
+            # If Reddit says "rate limit," honor the Retry-After header if possible
             if e.response and "Retry-After" in e.response.headers:
                 wait_time = int(e.response.headers["Retry-After"])
             else:
                 wait_time = 30
 
             tries += 1
+            last_exception = e
             logger.warning(
-                "[fetch_with_retry] 429 TooManyRequests while %s. "
-                "Retry after %s seconds (Attempt %s/%s)",
+                "[fetch_with_retry] 429 TooManyRequests while %s. Retry after %s seconds "
+                "(Attempt %s/%s)",
                 item_desc, wait_time, tries, max_tries
             )
-            await asyncio.sleep(wait_time)
+
+            # If we haven’t used up our attempts, wait and try again
+            if tries < max_tries:
+                await asyncio.sleep(wait_time)
+
         except Exception as ex:
-            logger.error("[fetch_with_retry] Error while %s: %s", item_desc, ex)
+            # For any other error, we also want to do multiple attempts,
+            # so we do not immediately raise. We track the exception and move on.
+            tries += 1
             last_exception = ex
-            raise
-        logger.error("[fetch_with_retry] Gave up on %s after %s attempts. Last error was: %s",
-                 item_desc, max_tries, last_exception)
+            logger.exception(
+                "[fetch_with_retry] Error while %s (attempt %s/%s):",
+                item_desc, tries, max_tries
+            )
+
+            # Optionally add a small sleep before retrying (to avoid immediate repeated failures)
+            if tries < max_tries:
+                await asyncio.sleep(5)
+
+    # If we get here, we tried max_tries times and failed every time.
+    logger.error(
+        "[fetch_with_retry] Gave up on %s after %s attempts. Last error was: %s",
+        item_desc, max_tries, last_exception
+    )
     return None
 
 def create_data_container():
@@ -156,7 +176,7 @@ async def process_submission(submission, category, data):
     """
     try:
         loaded = await fetch_with_retry(
-            submission.load(), 
+            submission.load,  # Pass the method without calling it
             f"loading submission {submission.id}"
         )
         if loaded is None:
@@ -193,9 +213,9 @@ async def process_comments(submission, category, data):
     Retrieves and processes all comments for a submission (in English).
     Also attempts to gather parent comment text in an optimized way if available.
     """
-    # Expand comments with fetch_with_retry
+    # Expand comments with fetch_with_retry using a lambda to create a new coroutine each time
     await fetch_with_retry(
-        submission.comments.replace_more(limit=None),
+        lambda: submission.comments.replace_more(limit=None),
         f"expanding comments for submission {submission.id}"
     )
 
@@ -243,7 +263,7 @@ async def search_subreddits(search_term="Samsung", limit=50):
         found.add(sub.display_name)
     return found
 
-async def search_posts(search_term="Samsung", limit=1000):
+async def search_posts(search_term="Samsung", limit=100):
     """
     Searches across r/all for posts mentioning the search_term,
     returning additional subreddits where it’s discussed.
@@ -318,34 +338,38 @@ async def fetch_subreddit_content(subreddits, search_term="Samsung", posts_per_s
     return data
 
 async def main():
-    logger.info("[main] Starting script...")
+    try:
+        logger.info("[main] Starting script...")
 
-    logger.info("[main] Gathering subreddits from search...")
-    subs_from_search = await search_subreddits()
+        logger.info("[main] Gathering subreddits from search...")
+        subs_from_search = await search_subreddits()
 
-    logger.info("[main] Gathering subreddits from posts...")
-    subs_from_posts = await search_posts()
+        logger.info("[main] Gathering subreddits from posts...")
+        subs_from_posts = await search_posts()
 
-    # Combine all unique subreddits
-    all_subs = subs_from_search.union(subs_from_posts)
-    all_subs = list(all_subs)
-    logger.info("[main] Found %d unique subreddits in total.", len(all_subs))
+        # Combine all unique subreddits
+        all_subs = subs_from_search.union(subs_from_posts)
+        all_subs = list(all_subs)
+        logger.info("[main] Found %d unique subreddits in total.", len(all_subs))
 
-    # If no subreddits found, exit early
-    if not all_subs:
-        logger.info("[main] No subreddits found. Exiting.")
-        return
+        # If no subreddits found, exit early
+        if not all_subs:
+            logger.info("[main] No subreddits found. Exiting.")
+            return
 
-    logger.info("[main] Starting data fetch...")
-    dataset = await fetch_subreddit_content(all_subs)
+        logger.info("[main] Starting data fetch...")
+        dataset = await fetch_subreddit_content(all_subs)
 
-    logger.info("[main] Data fetch complete. Building DataFrame...")
-    df = pd.DataFrame(dataset)
+        logger.info("[main] Data fetch complete. Building DataFrame...")
+        df = pd.DataFrame(dataset)
 
-    output_file = 'company_reputation_data.csv'
-    logger.info("[main] Saving DataFrame to %s...", output_file)
-    df.to_csv(output_file, index=False)
-    logger.info("[main] Dataset saved with %d entries. Done!", len(df))
+        output_file = 'company_reputation_data.csv'
+        logger.info("[main] Saving DataFrame to %s...", output_file)
+        df.to_csv(output_file, index=False)
+        logger.info("[main] Dataset saved with %d entries. Done!", len(df))
+    except KeyboardInterrupt:
+        await reddit.close()
+        logger.info("[main] Keyboard interrupt detected. Exiting.")
 
 if __name__ == "__main__":
     asyncio.run(main())
