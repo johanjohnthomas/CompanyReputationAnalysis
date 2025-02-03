@@ -96,7 +96,7 @@ async def fetch_with_retry(coro_func, item_desc: str = "unspecified", max_tries=
     """
     Calls a single async function (coro_func) and retries if an exception is raised.
     Specifically checks for TooManyRequests to respect Retry-After.
-    Logs the final exception if all retries fail and returns None.
+    Raises the last exception after all retries fail.
     """
     tries = 0
     last_exception = None
@@ -142,7 +142,7 @@ async def fetch_with_retry(coro_func, item_desc: str = "unspecified", max_tries=
         "[fetch_with_retry] Gave up on %s after %s attempts. Last error was: %s",
         item_desc, max_tries, last_exception
     )
-    return None
+    raise last_exception  # Raise the last exception to propagate the error
 
 def create_data_container():
     """
@@ -175,13 +175,10 @@ async def process_submission(submission, category, data):
     Then calls process_comments to handle all related comments.
     """
     try:
-        loaded = await fetch_with_retry(
+        await fetch_with_retry(
             submission.load,  # Pass the method without calling it
             f"loading submission {submission.id}"
         )
-        if loaded is None:
-            logger.warning("[process_submission] Skipping submission %s after repeated failures.", submission.id)
-            return
 
         post_date = localize_timestamp(submission.created_utc)
         post_title = submission.title or ""
@@ -210,16 +207,19 @@ async def process_submission(submission, category, data):
 
 async def process_comments(submission, category, data):
     """
-    Retrieves and processes all comments for a submission (in English).
-    Also attempts to gather parent comment text in an optimized way if available.
+    Retrieves and processes only the top-level comments for a submission (in English).
+    Since top-level comments are returned directly by submission.comments,
+    we remove the "MoreComments" objects without expanding them.
     """
-    # Expand comments with fetch_with_retry using a lambda to create a new coroutine each time
+    # Remove any "more" objects so that submission.comments only contains actual comments.
     await fetch_with_retry(
-        lambda: submission.comments.replace_more(limit=None),
-        f"expanding comments for submission {submission.id}"
+        lambda: submission.comments.replace_more(limit=0),
+        f"removing more objects for submission {submission.id}"
     )
 
-    for comment in submission.comments.list():
+    # Iterate only over top-level comments (do not flatten the entire comment tree)
+    for comment in submission.comments:
+        # Skip if the object does not have a 'body' (e.g., if still a MoreComments object)
         if not hasattr(comment, "body"):
             continue
 
@@ -229,18 +229,9 @@ async def process_comments(submission, category, data):
 
         comment_date = localize_timestamp(comment.created_utc)
 
-        # Attempt to fetch parent comment without an extra API call if possible
+        # For top-level comments, the parent is the submission itself.
+        # You could leave parent_text as None or set it to the post's title/body if desired.
         parent_text = None
-        parent_obj = comment.parent()
-        # If parent_obj is a Comment (not Submission), we can read it directly
-        if parent_obj and parent_obj.id != comment.id and hasattr(parent_obj, "body"):
-            possible_parent = clean_text(parent_obj.body)
-            if is_english(possible_parent):
-                parent_text = possible_parent
-        else:
-            # If the parent is a Submission or something else, we skip or optionally fetch it
-            # via an API call (comment.parent_id). For large volumes, consider performance tradeoffs.
-            pass
 
         data['title'].append(None)
         data['text'].append(comment_text)
@@ -252,6 +243,8 @@ async def process_comments(submission, category, data):
         data['parent_text'].append(parent_text)
         data['subreddit'].append(submission.subreddit.display_name)
         data['category'].append(category)
+
+
 
 async def search_subreddits(search_term="Samsung", limit=50):
     """
@@ -339,34 +332,44 @@ async def fetch_subreddit_content(subreddits, search_term="Samsung", posts_per_s
 
 async def main():
     try:
-        logger.info("[main] Starting script...")
+        # Define the companies you wish to search for
+        companies = ["Samsung", "Apple"]
 
-        logger.info("[main] Gathering subreddits from search...")
-        subs_from_search = await search_subreddits()
+        for company in companies:
+            logger.info("[main] Starting process for %s...", company)
 
-        logger.info("[main] Gathering subreddits from posts...")
-        subs_from_posts = await search_posts()
+            # 1) Gather subreddits via subreddit search
+            logger.info("[main] Gathering subreddits from search for '%s'...", company)
+            subs_from_search = await search_subreddits(search_term=company)
 
-        # Combine all unique subreddits
-        all_subs = subs_from_search.union(subs_from_posts)
-        all_subs = list(all_subs)
-        logger.info("[main] Found %d unique subreddits in total.", len(all_subs))
+            # 2) Gather subreddits via posts search in r/all
+            logger.info("[main] Gathering subreddits from posts for '%s'...", company)
+            subs_from_posts = await search_posts(search_term=company)
 
-        # If no subreddits found, exit early
-        if not all_subs:
-            logger.info("[main] No subreddits found. Exiting.")
-            return
+            # Combine all unique subreddits
+            all_subs = subs_from_search.union(subs_from_posts)
+            all_subs = list(all_subs)
+            logger.info("[main] Found %d unique subreddits for '%s'.", len(all_subs), company)
 
-        logger.info("[main] Starting data fetch...")
-        dataset = await fetch_subreddit_content(all_subs)
+            # If no subreddits found, skip to next company
+            if not all_subs:
+                logger.info("[main] No subreddits found for '%s'. Skipping.", company)
+                continue
 
-        logger.info("[main] Data fetch complete. Building DataFrame...")
-        df = pd.DataFrame(dataset)
+            # 3) Fetch posts and comments from all subreddits
+            logger.info("[main] Starting data fetch for '%s'...", company)
+            dataset = await fetch_subreddit_content(all_subs, search_term=company)
 
-        output_file = 'company_reputation_data.csv'
-        logger.info("[main] Saving DataFrame to %s...", output_file)
-        df.to_csv(output_file, index=False)
-        logger.info("[main] Dataset saved with %d entries. Done!", len(df))
+            # 4) Build DataFrame and export CSV
+            logger.info("[main] Data fetch complete for '%s'. Building DataFrame...", company)
+            df = pd.DataFrame(dataset)
+            output_file = f'company_reputation_data_{company.lower()}.csv'
+            logger.info("[main] Saving DataFrame to %s...", output_file)
+            df.to_csv(output_file, index=False)
+            logger.info("[main] Dataset for '%s' saved with %d entries. Done!", company, len(df))
+
+        await reddit.close()
+
     except KeyboardInterrupt:
         await reddit.close()
         logger.info("[main] Keyboard interrupt detected. Exiting.")
