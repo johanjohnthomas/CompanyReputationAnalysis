@@ -12,7 +12,7 @@ import nest_asyncio
 from langdetect import detect, LangDetectException
 from asyncprawcore.exceptions import TooManyRequests, Forbidden, NotFound
 
-# Configure logging
+# Configure logging and stuff
 logging.basicConfig(
     level=logging.INFO,
     format='[%(levelname)s] %(asctime)s - %(name)s - %(message)s',
