@@ -1,0 +1,3 @@
+[submodule "modules/YoutubeParser"]
+	path = modules/YoutubeParser
+	url = git@github.com:AdiKsOnDev/YouTubeParser.git
