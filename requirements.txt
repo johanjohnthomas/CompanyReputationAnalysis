@@ -1,0 +1,4 @@
+pytz
+pandas
+asyncpraw
+python-dotenv
