@@ -76,27 +76,31 @@ reasoning: The post criticizes Samsung's camera technology and marketing as dece
         "stream": False
     }
     try:
-        response = requests.post(api_url, json=payload)
-        response.raise_for_status()
-        json_data = response.json()
-        response_text = json_data['choices'][0]['message']['content'].strip()
+        while True:
+            response = requests.post(api_url, json=payload)
+            response.raise_for_status()
+            json_data = response.json()
+            response_text = json_data['choices'][0]['message']['content'].strip()
 
-        sentiment, is_relevant, reasoning = None, None, None
+            sentiment, is_relevant, reasoning = None, None, None
 
-        for line in response_text.split('\n'):
-            line = line.strip()
-            if line.startswith('sentiment:'):
-                sentiment = line.split(':', 1)[1].strip().lower()
-            elif line.startswith('isRelevant:'):
-                is_relevant = line.split(':', 1)[1].strip().lower()
-            elif line.startswith('reasoning:'):
-                reasoning = line.split(':', 1)[1].strip()
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith('sentiment:'):
+                    sentiment = line.split(':', 1)[1].strip().lower()
+                elif line.startswith('isRelevant:'):
+                    is_relevant = line.split(':', 1)[1].strip().lower()
+                elif line.startswith('reasoning:'):
+                    reasoning = line.split(':', 1)[1].strip()
 
-        return {
-            'sentiment': sentiment,
-            'is_relevant': is_relevant,
-            'reasoning': reasoning
-        }
+            if sentiment in ['positive', 'negative', 'neutral'] and is_relevant in ['relevant', 'irrelevant'] and reasoning:
+                return {
+                    'sentiment': sentiment,
+                    'is_relevant': is_relevant,
+                    'reasoning': reasoning
+                }
+            else:
+                print("Invalid response format received, retrying...")
     except requests.exceptions.RequestException as e:
         print(f"Error with the API: {e}")
         return None
