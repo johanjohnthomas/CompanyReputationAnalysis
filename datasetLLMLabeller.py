@@ -1,16 +1,19 @@
 import os
 import pandas as pd
+from dotenv import load_dotenv
 import requests
 
+load_dotenv()
 # Filepaths for your CSV files
-input_csv = 'data/Samsung/OriginalPostData/cleaned_company_reputation_data_samsung_posts.csv'
-output_csv = 'data/Samsung/v2_qwen2.5-7b-instruct_cleaned_company_reputation_data_samsung_posts.csv'
+input_csv = os.getenv('INPUT_PATH')
+output_csv = os.getenv('OUTPUT_PATH')
 
 # How often to save intermediate progress (e.g., every 100 rows)
 CHECKPOINT_INTERVAL = 100
+LLM_ADDRESS = os.getenv('LLM_ADDRESS')
 
 # LMStudio/QWEN API endpoint (based on the curl example)
-api_url = "http://192.168.0.177:1234/v1/chat/completions"
+api_url = f"http://{LLM_ADDRESS}/v1/chat/completions"
 
 def classify_text(subreddit, text):
     """Classify text for sentiment, relevance, and reasoning."""
